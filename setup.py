@@ -920,6 +920,10 @@ def get_system_specs():
                         break
             except:
                 pass
+    elif sys.platform == "darwin":
+        try:
+            ram_gb = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], encoding='utf-8').strip()) / (1024**3)
+        except: pass
     else:
         try:
             with open('/proc/meminfo', 'r') as f:
@@ -933,6 +937,10 @@ def get_system_specs():
     if ram_gb == 0:
         print("[!] Warning: Could not detect System RAM. Defaulting to 16GB.")
         ram_gb = 16
+
+    if sys.platform == "darwin":
+        # Apple Silicon has unified memory: the GPU shares system RAM.
+        return ram_gb, ram_gb
 
     try:
         out = subprocess.check_output(
@@ -1001,6 +1009,10 @@ def create_wgp_config(profile_key, config_data):
         pid = 4
     else:
         pid = 5
+
+    if profile_key == "MPS":
+        # Unified memory: profiles 1/2 keep a reserved-RAM copy next to the "VRAM" copy, holding the weights twice in the same pool.
+        pid = 3 if ram > 60 else 4 if ram > 30 else 5
 
     prof_settings = config_data['gpu_profiles'].get(profile_key, {})
 
