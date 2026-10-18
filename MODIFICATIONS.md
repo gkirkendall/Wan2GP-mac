@@ -4,6 +4,16 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-18: merged upstream v17–v18 (`mac-v0.2.0`)
+
+Upstream `main` was merged at `22d1f261` (39 commits: WanGP v17 and v18). There were no conflicts. The four changes from 2026-10-03 below carry over unchanged, and they now apply against `22d1f261`.
+No new modifications were made.
+
+Notes for Mac installs:
+- mmgp is now bundled in the repository (`mmgp/`), not installed with pip. Existing environments should run `pip uninstall mmgp` and then `pip install -r requirements.txt`.
+- mmgp's new allocator (`mmgp/allocator`) is CUDA-only and stays inactive on MPS. The WanGP UI starts cleanly on an M4 Max with torch 2.14.1.
+- `shared/mps/test_mps_forward.py` (upstream) no longer matches the current `WanModel.forward` signature, and this was already the case before the merge. It fails before the forward pass runs, so its result says nothing about MPS support.
+
 ## 2026-10-03: Apple Silicon installer and dependency fixes (`mac-fixes` branch)
 
 Changes against upstream `main` at `b8b18f81`:
