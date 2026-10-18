@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 
 
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from mmgp import cuda_graphs
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -25,7 +27,8 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import AdaLayerNormContinuous, RMSNorm
-from shared.attention import pay_attention
+from shared import attention_kit
+from shared.kernels import ops
 import functools
 
 def get_timestep_embedding(
@@ -94,32 +97,28 @@ def apply_rotary_emb_qwen_inplace(x_list: list, freqs_cis: torch.Tensor) -> torc
     Returns:
         Tensor with rotary embeddings applied [B, S, H, D]
     """
-    x_in = x_list[0]
-    dtype = x_in.dtype
-    # Reshape to separate real/imag pairs: [B, S, H, D] -> [B, S, H, D//2, 2]
-    x = x_in.float().reshape(*x_in.shape[:-1], -1, 2)
-    x_in = None
-    x_list.clear()
+    return ops.interleaved_rope(x_list, freqs_cis)
 
-    # freqs_cis shape: [S, D//2, 2] where [..., 0] is cos, [..., 1] is sin
-    # Add batch and head dims: [1, S, 1, D//2]
-    cos = freqs_cis[..., 0].unsqueeze(0).unsqueeze(2)
-    sin = freqs_cis[..., 1].unsqueeze(0).unsqueeze(2)
 
-    # Get views into x for in-place modification
-    x0 = x[..., 0]  # real part
-    x1 = x[..., 1]  # imag part
+def _norm_rope_rows(x, norm, freqs):
+    """norm then RoPE of rows of q or k (batch, tokens, heads, head_dim), as QwenDoubleStreamAttnProcessor2_0 computes them."""
+    if norm is not None:
+        x = norm(x)
+    if freqs is None:
+        return x
+    x_list, x = [x], None
+    return apply_rotary_emb_qwen_inplace(x_list, freqs)
 
-    # Apply rotation in-place:
-    # new_x0 = x0 * cos - x1 * sin
-    # new_x1 = x1 * cos + x0 * sin
-    x0_orig = x0.clone()
-    x0.mul_(cos)
-    x0.addcmul_(x1, sin, value=-1)
-    x1.mul_(cos)
-    x1.addcmul_(x0_orig, sin)
 
-    return x.flatten(3).to(dtype)
+def _norm_rope_(query, key, segments):
+    """attention_kit callback: per segment of tokens (start, stop, q norm, k norm, freqs), the norms and RoPE of q and/or k in place, by
+    chunks of tokens; freqs (segment tokens, head_dim // 2, 2) or None."""
+    for tensor, index in ((query, 2), (key, 3)):
+        if tensor is not None:
+            for segment in segments:
+                start, norm, freqs = segment[0], segment[index], segment[4]
+                if norm is not None or freqs is not None:
+                    attention_kit.rows_(tensor, lambda part, first, last: _norm_rope_rows(part, norm, None if freqs is None else freqs[first - start:last - start]), start, segment[1])
 
 
 class QwenTimestepProjEmbeddings(nn.Module):
@@ -397,83 +396,20 @@ class QwenDoubleStreamAttnProcessor2_0:
         hidden_states, encoder_hidden_states = hidden_states_list
         hidden_states_list.clear()
 
-        seq_txt = encoder_hidden_states.shape[1]
+        seq_txt, seq_img = encoder_hidden_states.shape[1], hidden_states.shape[1]
+        img_freqs, txt_freqs = (None, None) if image_rotary_emb is None else image_rotary_emb
+        # joint attention of the text then image tokens, each stream with its projections, QK norms and RoPE
+        streams = [([encoder_hidden_states], (attn.add_q_proj, attn.add_k_proj, attn.add_v_proj)), ([hidden_states], (attn.to_q, attn.to_k, attn.to_v))]
+        del hidden_states, encoder_hidden_states
+        segments = ((0, seq_txt, attn.norm_added_q, attn.norm_added_k, txt_freqs), (seq_txt, seq_txt + seq_img, attn.norm_q, attn.norm_k, img_freqs))
+        joint_hidden_states = attention_kit.joint_qkv_attention(streams, attn.heads, attn.to_q.out_features // attn.heads,
+                                                                lambda query, key, group: _norm_rope_(query, key, segments)).flatten(2, 3)
 
-        # Compute QKV for image stream (sample projections)
-        img_query = attn.to_q(hidden_states)
-        img_key = attn.to_k(hidden_states)
-        img_value = attn.to_v(hidden_states)
-        del hidden_states
-        # Compute QKV for text stream (context projections)
-        txt_query = attn.add_q_proj(encoder_hidden_states)
-        txt_key = attn.add_k_proj(encoder_hidden_states)
-        txt_value = attn.add_v_proj(encoder_hidden_states)
-        del encoder_hidden_states
-        # Reshape for multi-head attention
-        img_query = img_query.unflatten(-1, (attn.heads, -1))
-        img_key = img_key.unflatten(-1, (attn.heads, -1))
-        img_value = img_value.unflatten(-1, (attn.heads, -1))
-
-        txt_query = txt_query.unflatten(-1, (attn.heads, -1))
-        txt_key = txt_key.unflatten(-1, (attn.heads, -1))
-        txt_value = txt_value.unflatten(-1, (attn.heads, -1))
-
-        # Apply QK normalization
-        if attn.norm_q is not None:
-            img_query = attn.norm_q(img_query)
-        if attn.norm_k is not None:
-            img_key = attn.norm_k(img_key)
-        if attn.norm_added_q is not None:
-            txt_query = attn.norm_added_q(txt_query)
-        if attn.norm_added_k is not None:
-            txt_key = attn.norm_added_k(txt_key)
-
-        # Apply RoPE (in-place, no complex numbers for better torch.compile support)
-        if image_rotary_emb is not None:
-            img_freqs, txt_freqs = image_rotary_emb
-            x_list = [img_query]
-            del img_query
-            img_query = apply_rotary_emb_qwen_inplace(x_list, img_freqs)
-            x_list = [img_key]
-            del img_key
-            img_key = apply_rotary_emb_qwen_inplace(x_list, img_freqs)
-            x_list = [txt_query]
-            del txt_query
-            txt_query = apply_rotary_emb_qwen_inplace(x_list, txt_freqs)
-            x_list = [txt_key]
-            del txt_key
-            txt_key = apply_rotary_emb_qwen_inplace(x_list, txt_freqs)
-
-        # Concatenate for joint attention
-        # Order: [text, image]
-        joint_query = torch.cat([txt_query, img_query], dim=1)
-        del txt_query, img_query
-        joint_key = torch.cat([txt_key, img_key], dim=1)
-        del txt_key, img_key
-        joint_value = torch.cat([txt_value, img_value], dim=1)
-        del txt_value, img_value
-
-        # Compute joint attention
-        dtype = joint_query.dtype
-        qkv_list = [joint_query, joint_key, joint_value ]
-        del joint_query, joint_key, joint_value
-        joint_hidden_states = pay_attention(qkv_list)
-
-        # Reshape back
-        joint_hidden_states = joint_hidden_states.flatten(2, 3)
-        joint_hidden_states = joint_hidden_states.to(dtype)
-
-        # Split attention outputs back
-        txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
-        img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
-        del joint_hidden_states
         # Apply output projections
-        img_attn_output = attn.to_out[0](img_attn_output)
+        img_attn_output = attn.to_out[0](joint_hidden_states[:, seq_txt:])
         if len(attn.to_out) > 1:
             img_attn_output = attn.to_out[1](img_attn_output)  # dropout
-
-        txt_attn_output = attn.to_add_out(txt_attn_output)
-
+        txt_attn_output = attn.to_add_out(joint_hidden_states[:, :seq_txt])
         return img_attn_output, txt_attn_output
 
 
@@ -537,7 +473,7 @@ class QwenImageTransformerBlock(nn.Module):
             ffn_chunk[...] = mlp(ffn_chunk)
         # ffn_in is already modified in-place via ffn_in_flat view
 
-    def _modulate(self, x, mod_params, index=None):
+    def _modulate(self, x_list, mod_params, index=None):
         """Apply modulation to input tensor"""
         shift, scale, gate = mod_params.chunk(3, dim=-1)
 
@@ -563,13 +499,7 @@ class QwenImageTransformerBlock(nn.Module):
             scale_result = scale.unsqueeze(1)
             gate_result = gate.unsqueeze(1)
 
-        return x * (1 + scale_result) + shift_result, gate_result
-
-    def _modulate_inplace(self, x, shift, scale, gate):
-        scale.add_(1.0)
-        x.mul_(scale.unsqueeze(1))
-        x.add_(shift.unsqueeze(1))
-        return gate.unsqueeze(1)
+        return ops.scale_shift(x_list, scale_result, shift_result, in_place=False), gate_result
 
     def forward(
         self,
@@ -594,12 +524,12 @@ class QwenImageTransformerBlock(nn.Module):
             txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2 = txt_mod_params.chunk(6, dim=-1)
 
             # Process image stream - norm1 + modulation (in-place)
-            img_normed = self.img_norm1(hidden_states)
-            img_gate1 = self._modulate_inplace(img_normed, img_shift1, img_scale1, img_gate1)
+            img_normed = ops.norm_scale_shift([hidden_states], self.img_norm1, img_scale1.unsqueeze(1), img_shift1.unsqueeze(1))
+            img_gate1 = img_gate1.unsqueeze(1)
 
             # Process text stream - norm1 + modulation (in-place)
-            txt_normed = self.txt_norm1(encoder_hidden_states)
-            txt_gate1 = self._modulate_inplace(txt_normed, txt_shift1, txt_scale1, txt_gate1)
+            txt_normed = ops.norm_scale_shift([encoder_hidden_states], self.txt_norm1, txt_scale1.unsqueeze(1), txt_shift1.unsqueeze(1))
+            txt_gate1 = txt_gate1.unsqueeze(1)
 
             hidden_states_list = [img_normed, txt_normed]
             del img_normed, txt_normed
@@ -613,27 +543,33 @@ class QwenImageTransformerBlock(nn.Module):
             )
 
             # Apply attention gates and add residual in-place
-            hidden_states.addcmul_(img_attn_output, img_gate1)
-            encoder_hidden_states.addcmul_(txt_attn_output, txt_gate1)
+            output_list, img_attn_output = [img_attn_output], None
+            ops.gated_residual_(hidden_states, output_list, img_gate1, fused=True)
+            output_list, txt_attn_output = [txt_attn_output], None
+            ops.gated_residual_(encoder_hidden_states, output_list, txt_gate1, fused=True)
 
-            img_normed2 = self.img_norm2(hidden_states)
-            img_gate2 = self._modulate_inplace(img_normed2, img_shift2, img_scale2, img_gate2)
+            img_normed2 = ops.norm_scale_shift([hidden_states], self.img_norm2, img_scale2.unsqueeze(1), img_shift2.unsqueeze(1))
+            img_gate2 = img_gate2.unsqueeze(1)
             self._apply_ffn_chunked(img_normed2, self.img_mlp)
-            hidden_states.addcmul_(img_normed2, img_gate2)
+            output_list, img_normed2 = [img_normed2], None
+            ops.gated_residual_(hidden_states, output_list, img_gate2, fused=True)
 
-            txt_normed2 = self.txt_norm2(encoder_hidden_states)
-            txt_gate2 = self._modulate_inplace(txt_normed2, txt_shift2, txt_scale2, txt_gate2)
+            txt_normed2 = ops.norm_scale_shift([encoder_hidden_states], self.txt_norm2, txt_scale2.unsqueeze(1), txt_shift2.unsqueeze(1))
+            txt_gate2 = txt_gate2.unsqueeze(1)
             txt_normed2 = self.txt_mlp(txt_normed2)
-            encoder_hidden_states.addcmul_(txt_normed2, txt_gate2)
+            output_list, txt_normed2 = [txt_normed2], None
+            ops.gated_residual_(encoder_hidden_states, output_list, txt_gate2, fused=True)
         else:
             img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)
             txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)
 
             img_normed = self.img_norm1(hidden_states)
-            img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, modulate_index)
+            normed_list, img_normed = [img_normed], None
+            img_modulated, img_gate1 = self._modulate(normed_list, img_mod1, modulate_index)
 
             txt_normed = self.txt_norm1(encoder_hidden_states)
-            txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
+            normed_list, txt_normed = [txt_normed], None
+            txt_modulated, txt_gate1 = self._modulate(normed_list, txt_mod1)
 
             hidden_states_list = [img_modulated, txt_modulated]
             del img_modulated, txt_modulated
@@ -646,18 +582,24 @@ class QwenImageTransformerBlock(nn.Module):
                 **joint_attention_kwargs,
             )
 
-            hidden_states.addcmul_(img_attn_output, img_gate1)
-            encoder_hidden_states.addcmul_(txt_attn_output, txt_gate1)
+            output_list, img_attn_output = [img_attn_output], None
+            ops.gated_residual_(hidden_states, output_list, img_gate1, fused=True)
+            output_list, txt_attn_output = [txt_attn_output], None
+            ops.gated_residual_(encoder_hidden_states, output_list, txt_gate1, fused=True)
 
             img_normed2 = self.img_norm2(hidden_states)
-            img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, modulate_index)
+            normed_list, img_normed2 = [img_normed2], None
+            img_modulated2, img_gate2 = self._modulate(normed_list, img_mod2, modulate_index)
             self._apply_ffn_chunked(img_modulated2, self.img_mlp)
-            hidden_states.addcmul_(img_modulated2, img_gate2)
+            output_list, img_modulated2 = [img_modulated2], None
+            ops.gated_residual_(hidden_states, output_list, img_gate2, fused=True)
 
             txt_normed2 = self.txt_norm2(encoder_hidden_states)
-            txt_modulated2, txt_gate2 = self._modulate(txt_normed2, txt_mod2)
+            normed_list, txt_normed2 = [txt_normed2], None
+            txt_modulated2, txt_gate2 = self._modulate(normed_list, txt_mod2)
             txt_modulated2 = self.txt_mlp(txt_modulated2)
-            encoder_hidden_states.addcmul_(txt_modulated2, txt_gate2)
+            output_list, txt_modulated2 = [txt_modulated2], None
+            ops.gated_residual_(encoder_hidden_states, output_list, txt_gate2, fused=True)
 
         # Clip to prevent overflow for fp16
         if encoder_hidden_states.dtype == torch.float16:
@@ -787,8 +729,8 @@ class QwenImageTransformer2DModel(nn.Module):
                 base_shapes = img_shapes[0]
             seq_counts = [f * h * w for f, h, w in base_shapes]
             base_index = [0] * seq_counts[0] + [1] * sum(seq_counts[1:])
+            # (1, tokens): broadcast over the batch by _modulate; an expanded view would alias rows in CUDA graph static buffers
             modulate_index = torch.tensor(base_index, device=timestep.device, dtype=torch.int).unsqueeze(0)
-            modulate_index = modulate_index.expand(hidden_states.shape[0], -1)
         hidden_states_list = [hidden_states if i == 0 else hidden_states.clone() for i, _ in enumerate(encoder_hidden_states_list)]
         
         new_encoder_hidden_states_list = []
@@ -812,21 +754,22 @@ class QwenImageTransformer2DModel(nn.Module):
 
         hidden_states = None
 
-        for index_block, block in enumerate(self.transformer_blocks):
-            if callback != None:
-                callback(-1, None, False, True)
-            if pipeline._interrupt:
-                return [None] * len(hidden_states_list)
-            for hidden_states, encoder_hidden_states, encoder_hidden_states_mask, image_rotary_emb in zip(hidden_states_list, encoder_hidden_states_list, encoder_hidden_states_mask_list, image_rotary_emb_list):
-                encoder_hidden_states[...], hidden_states[...] = block(
-                    hidden_states=hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_hidden_states_mask=encoder_hidden_states_mask,
-                    temb=temb,
-                    image_rotary_emb=image_rotary_emb,
-                    joint_attention_kwargs=attention_kwargs,
-                    modulate_index=modulate_index,
-                )
+        with cuda_graphs.scope():
+            for index_block, block in enumerate(self.transformer_blocks):
+                if callback != None:
+                    callback(-1, None, False, True)
+                if pipeline._interrupt:
+                    return [None] * len(hidden_states_list)
+                for hidden_states, encoder_hidden_states, encoder_hidden_states_mask, image_rotary_emb in zip(hidden_states_list, encoder_hidden_states_list, encoder_hidden_states_mask_list, image_rotary_emb_list):
+                    encoder_hidden_states[...], hidden_states[...] = block(
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_hidden_states_mask=encoder_hidden_states_mask,
+                        temb=temb,
+                        image_rotary_emb=image_rotary_emb,
+                        joint_attention_kwargs=attention_kwargs,
+                        modulate_index=modulate_index,
+                    )
 
         # Use only the image part (hidden_states) from the dual-stream blocks
         temb_out = temb
