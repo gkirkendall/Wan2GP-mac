@@ -4,7 +4,21 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-18: MPS weight-transfer fix (`mac-v0.2.1`)
+
+**`shared/mps/device_patch.py`: `torch.cuda.Event` and `torch.cuda.Stream` are real barriers on MPS.**
+Before: the MPS shim replaced them with no-ops (`synchronize()` did nothing, `query()` always returned True). The mmgp bundled since v17 copies pageable
+weights to the GPU through two reusable pinned staging slots and waits on an event before refilling a slot. With the no-op event, the CPU overwrote
+a slot before MPS had copied it, so models ran with scrambled weights: LTX-2.5 produced noise after the first frames.
+A 64 MB transfer through mmgp's `_PinnedStager` was corrupted 5 times out of 5.
+Now: event `synchronize()`, `query()` and `wait()`, and stream `synchronize()` and `wait_event()`, call `torch.mps.synchronize()`. The transfer test is exact 5/5.
+LTX-2.5 and Qwen Image Edit 2511 renders match their 2026-10-03 baselines. Denoising is slower than on `mac-v0.1.0` (LTX +27%, Qwen 2-step +61%),
+but whole jobs are faster (LTX 530 s → 163 s, Qwen 736 s → 676 s) because model loading is much faster. This only affects MPS; `apply_mps_patch()` does not run elsewhere.
+
 ## 2026-10-18: merged upstream v17–v18 (`mac-v0.2.0`)
+
+**Broken on MPS; use `mac-v0.2.1`.** See above.
+
 
 Upstream `main` was merged at `22d1f261` (39 commits: WanGP v17 and v18). There were no conflicts. The four changes from 2026-10-03 below carry over unchanged, and they now apply against `22d1f261`.
 No new modifications were made.

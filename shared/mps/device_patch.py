@@ -34,10 +34,25 @@ def apply_mps_patch():
     print(f"[MPS Patch] Detected: {chip_name}, {system_ram_gb:.0f}GB RAM")
     print(f"[MPS Patch] Device capability: {dev_cap}, BF16: {bfloat16_supported}")
 
+    # Events and streams are barriers, not no-ops: mmgp reuses pinned staging memory once an event
+    # completes, so an event that never waits lets the CPU overwrite weights before MPS has copied them.
+    # MPS runs GPU work in order on one queue, so a full synchronize is all a wait needs.
+    class _MpsBarrierEvent:
+        def __init__(self, *a, **kw): pass
+        def record(self, *a, **kw): pass
+        def elapsed_time(self, *a, **kw): return 0.0
+        def synchronize(self, *a, **kw): _torch.mps.synchronize()
+        def wait(self, *a, **kw): _torch.mps.synchronize()
+        def query(self):
+            _torch.mps.synchronize()
+            return True
+
     # Dummy objects
     _dummy_stream = types.SimpleNamespace(
         synchronize=_torch.mps.synchronize,
         wait_stream=lambda *a, **kw: None,
+        wait_event=lambda *a, **kw: _torch.mps.synchronize(),
+        record_event=lambda *a, **kw: _MpsBarrierEvent(),
         query=lambda: True,
         priority=0,
     )
@@ -51,13 +66,6 @@ def apply_mps_patch():
             _torch.cuda._device_props_cache = self
         multi_processor_count = 0
         warp_size = 32
-
-    class _DummyEvent:
-        def __init__(self, *a, **kw): pass
-        def record(self, *a, **kw): pass
-        def elapsed_time(self, *a, **kw): return 0.0
-        def synchronize(self, *a, **kw): pass
-        def query(self): return True
 
     class _DummyDeviceContext:
         def __init__(self, device=None): pass
@@ -125,13 +133,17 @@ def apply_mps_patch():
     class _PatchedStream:
         priority = 0
         def __init__(self, *a, **kw): pass
-        def synchronize(self, *a, **kw): pass
+        def synchronize(self, *a, **kw): _torch.mps.synchronize()
         def wait_stream(self, *a, **kw): pass
-        def query(self): return True
+        def wait_event(self, *a, **kw): _torch.mps.synchronize()
+        def record_event(self, *a, **kw): return _MpsBarrierEvent()
+        def query(self):
+            _torch.mps.synchronize()
+            return True
 
     _cuda.Stream = _PatchedStream
     _cuda.stream = lambda s: _DummyStreamContext(s)
-    _cuda.Event = _DummyEvent
+    _cuda.Event = _MpsBarrierEvent
     _cuda.is_bf16_supported = lambda device=None: bfloat16_supported
     _cuda.bfloat16_supported = lambda device=None: bfloat16_supported
     _cuda.is_current_stream_capturing = lambda: False
