@@ -4,6 +4,19 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-18: MiniMax H3 runs on MPS (`mac-v0.2.2`)
+
+1. **`models/minimax_h3/pipeline.py`: the pipeline's `device` property returns `mps` on Apple Silicon.**
+   Before: without CUDA it returned the transformer's parameter device, which is the CPU under mmgp, so H3 tried to compute on the CPU.
+   The `cuda` branch is still checked first, so NVIDIA and AMD behave as before.
+2. **`models/minimax_h3/pdd.py` and `models/minimax_h3/lora_affine.py`: move to the CPU first, then cast to float64.**
+   PyTorch 2.14.1 on MPS returns all zeros for a one-call `t.to(device="cpu", dtype=torch.float64)`; other dtypes, and moving then casting, are correct.
+   With the device fix above, the PDD sigma schedule is built on MPS, and the zeroed copy failed the "strictly descending sigma boundaries" check.
+   Values and dtypes are unchanged on every device.
+
+Measured on an M4 Max (128 GB, torch 2.14.1, no `--preload`): MiniMax H3 Ref2VA Pruned PDD 8-step, 1024×576, 107 frames with 4 reference images,
+finished in 39m 43s (about 4 min per denoising step), lowest free memory 38%, with video and stereo audio.
+
 ## 2026-10-18: MPS weight-transfer fix (`mac-v0.2.1`)
 
 **`shared/mps/device_patch.py`: `torch.cuda.Event` and `torch.cuda.Stream` are real barriers on MPS.**

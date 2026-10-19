@@ -35,7 +35,7 @@ def pdd_sampling_plans(shift, num_steps=PDD_NUM_STEPS, block_size=PDD_BLOCK_SIZE
 
 def pdd_sampling_plans_for_sigmas(sigmas, shift, num_steps=PDD_NUM_STEPS):
     """Fuse fine PDD intervals over arbitrary descending shifted-sigma ranges."""
-    sigmas = torch.as_tensor(sigmas).flatten().detach().to(device="cpu", dtype=torch.float64, non_blocking=False)
+    sigmas = torch.as_tensor(sigmas).flatten().detach().cpu().to(torch.float64)
     times = 1.0 - sigmas
     fine = pdd_time_grid(shift, num_steps)
     starts, ends = fine[:-1], fine[1:]

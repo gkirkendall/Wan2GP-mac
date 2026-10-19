@@ -55,7 +55,7 @@ def _load_affine_package(architecture, width=8):
 
 
 def _aligned_affine_map(architecture, target_table):
-    target_table = target_table.detach().to(device="cpu", dtype=torch.float64)
+    target_table = target_table.detach().cpu().to(torch.float64)
     if target_table.ndim != 2 or target_table.shape[1] not in _PRUNED_WIDTHS:
         raise ValueError(f"Unsupported MiniMax H3 {architecture} AdaLN target table shape {tuple(target_table.shape)}")
     canonical_table, canonical_affine = _load_affine_package(architecture, target_table.shape[1])

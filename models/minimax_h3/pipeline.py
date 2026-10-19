@@ -426,7 +426,7 @@ class MiniMaxH3Pipeline:
 
     @property
     def device(self):
-        return torch.device("cuda" if torch.cuda.is_available() else next(self.transformer.parameters()).device)
+        return torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else next(self.transformer.parameters()).device)
 
     def get_loras_transformer(self, _get_model_recursive_prop, model_type, model_def, guidance_phases, activated_loras,
                               loras_multipliers="", transformer_loras_filenames=(), **_kwargs):
