@@ -4,6 +4,18 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-21: merged upstream `fdc63bdf`, H3 audio continuity (`mac-v0.2.3`)
+
+Upstream's one commit (2026-10-19, 10 files) merged into `mac-fixes` with no conflicts; our MPS edits in `pipeline.py` and the
+`torchcodec` pin are untouched. It brings: H3 sound that runs 0.1 s past each window so sliding windows and Continue Video join
+cleanly (saved H3 videos keep that 0.1 s tail); an "End Image Strength" setting for H3 FL2VA and Ref2VA (default 1 = as before);
+Discard Last Frames in steps of 1 for H3; a CUDA-only GGUF fix; `tensordict` dropped from `requirements.txt` (it stays installed in
+`env_torch214`, unused). The changed files compile in `env_torch214`.
+
+**Not yet tested by a render.** The planned test (lab PLAN.md, Phase U3: a two-window H3 FL2VA clip, listening at the join) is on
+hold: the FL2VA path renders a flat brown field on MPS (MPT `tests/t-sf1/RESULT.md`, sf4, on the code before this merge), so that
+test would show nothing about the sound. It runs after the FL2VA fix, or on Ref2VA if the owner prefers.
+
 ## 2026-10-18: MiniMax H3 runs on MPS (`mac-v0.2.2`)
 
 1. **`models/minimax_h3/pipeline.py`: the pipeline's `device` property returns `mps` on Apple Silicon.**
