@@ -66,7 +66,7 @@ Control Video (`video_guide`) is split across sliding windows, each window recei
 
 `audio_prompt_type`: empty = generate video and audio; `A` = `audio_guide` is the soundtrack; `K` = the control video's audio track is the soundtrack (`GV` or `VU`); `2` = keep control frames and generate their audio (`GV`). The video follows a soundtrack and WanGP keeps it as the output audio when it covers the video; a shorter one permits generated sound afterward. For visible speech in soundtrack mode, identify the character and explicitly request `speaking with natural lip movements synchronized` or equivalent lip-sync wording, without mentioning a supplied audio track or its language. Do not write the spoken words (no `<d>` dialogue): given a written line, H3 voices its own dialogue and the mouth often stops following the soundtrack. Keep the speaker's action to speaking: smiles, gestures and nods compete with the mouth. Exact lip sync is not guaranteed.
 
-Use `capabilities` for window limits. WanGP rounds overlap to compatible values (1, 18, 35, ...); `video_length` sets total duration across windows. Read `prompt_infos` for H3's structured prompt syntax.
+Use `capabilities` for window limits. WanGP rounds overlap to compatible values (1, 18, 35, ...); `video_length` sets total duration across windows. A window may jump onto an end image its action did not reach; `sliding_window_discard_last_frames` about 5 hides it: the end image of every window but the last is generated after the discarded frames (steers, not shown); the last window ends on its end image. `input_video_strength` (default 1) softens end images and injected frames: about 0.5 eases into them with an approximate frame; 0.6 and above act like 1. Read `prompt_infos` for H3's structured prompt syntax.
 """
 
 FL2VA_INFOS = """## FL2VA — First/Last Frame to Video and Audio
@@ -104,10 +104,14 @@ For visible speech in soundtrack mode, identify the character and explicitly req
 
 Sliding windows can continue a video beyond one generation. Choose any overlap amount and WanGP will round it to the nearest H3-compatible value (1, 18, 35, 52...). It automatically reuses the overlapping video and audio to make the join smoother.
 
+**End images between windows:** each window lands exactly on its end image. When the action has drifted away from that picture, the last few frames jump to it. To hide this jump, set **Discard Last Frames** to about `5`: the end image of every window except the last is then generated just after the discarded frames, so it steers the action without being shown, and the next window continues from the frames before it. The last window still ends exactly on its end image.
+
+**End Image / Injected Frames Strength:** at `1` (default) end images and injected frames are matched exactly. Around `0.5` the video eases toward them instead and only approaches the picture; when the action is already close to it, the jump can remain. Values from about `0.6` behave like `1`. The setting never applies to the start image or a continued video.
+
 H3 is designed for 24 FPS, although WanGP can generate at another frame rate. MiniMax documents an official duration of 4–15 seconds per generation window; longer videos are possible through sliding windows.
 """
 
-REF2VA_DEEPY_INFOS = """Generate video and 32 kHz stereo audio from `prompt` and references. Ordered `image_refs` guide identity, objects or setting; reference flags in `video_prompt_type`: `I` preserves chosen output dimensions, `KI` derives them from the first image. `image_start` / `image_end` are timeline anchors shown before general image references. `FI` injects the first `image_refs` at `frames_positions` (`1` = first frame, `L` = window end, `X` = skip a window); remaining images are references; not with `GV`. Per window, pictures are numbered: start or continued frame (`<Picture 1>`), end image, that window's injected frames by time, then references. `video_source` and sliding windows provide continuation.
+REF2VA_DEEPY_INFOS = """Generate video and 32 kHz stereo audio from `prompt` and references. Ordered `image_refs` guide identity, objects or setting; reference flags in `video_prompt_type`: `I` preserves chosen output dimensions, `KI` derives them from the first image. `image_start` / `image_end` are timeline anchors shown before general image references. `FI` injects the first `image_refs` at `frames_positions` (`1` = first frame, `L` = window end, `X` = skip a window); remaining images are references; not with `GV`. Per window, pictures are numbered: start or continued frame (`<Picture 1>`), end image, that window's injected frames by time, then references. `video_source` and sliding windows provide continuation. A window may jump onto an end image its action did not reach; `sliding_window_discard_last_frames` about 5 hides it: the end image of every window but the last is generated after the discarded frames (steers, not shown); the last window ends on its end image. `input_video_strength` (default 1) softens end images and injected frames: about 0.5 eases into them with an approximate frame; 0.6 and above act like 1.
 
 `video_guide`, `video_guide2` and `video_guide3` supply up to three reference videos for appearance, motion or camera; choose the corresponding video mode. `V1-U` instead takes up to three excerpts from `video_guide` at `custom_settings.h3_video_excerpt_positions`: frame numbers or seconds such as `5.2s`, each optionally followed by `/duration` (default 3s), for example `3 5.2s/4s 12s`. Reference videos preserve the chosen output size and are given whole to every sliding window. Control videos (`VU`, `GV`) use the control video's aspect ratio and are split across sliding windows, each window receiving its own section. Use Reference Video for motion transfer to image-reference characters; for depth, pose or edge control use the MiniMax H3 FL2VA ControlNet-Union model. `VU` supplies the control video's unchanged frames as `<Video 1>`: an in-context guide for LoRAs that transform a source video, such as character swap; name it `<Video 1>` in the prompt and state what to do with it. `GV` (Denoise Control Video) edits through denoising: lower strength preserves more source content; at strength 1 without a mask, the source supplies no visual conditioning. `GV` does not supply a video reference.
 
@@ -180,6 +184,10 @@ Select **Inject Frames at chosen Positions** in **Reference Images** to place im
 An injected frame on a window's first or last frame acts as that window's start or end image; one inside the sliding-window overlap is not used, because the overlap already continues the previous window. In each window, pictures are numbered in this order: the start image or the frame continued from the previous window (`<Picture 1>`), the end image, the injected frames of that window in time order, then the reference images. The numbering restarts in every window, so describe each window separately when injected frames or reference images change the count, and declare each injected frame at its time in the window.
 
 For longer videos, choose any sliding-window overlap amount and WanGP will round it to the nearest H3-compatible value (1, 18, 35, 52...). It automatically carries the overlapping video and audio into the next window while keeping the selected references available.
+
+**End images between windows:** each window lands exactly on its end image. When the action has drifted away from that picture, the last few frames jump to it. To hide this jump, set **Discard Last Frames** to about `5`: the end image of every window except the last is then generated just after the discarded frames, so it steers the action without being shown, and the next window continues from the frames before it. The last window still ends exactly on its end image.
+
+**End Image / Injected Frames Strength:** at `1` (default) end images and injected frames are matched exactly. Around `0.5` the video eases toward them instead and only approaches the picture; when the action is already close to it, the jump can remain. Values from about `0.6` behave like `1`. The setting never applies to the start image or a continued video.
 
 H3 is designed for 24 FPS, although WanGP can generate at another frame rate. MiniMax documents an official duration of 4–15 seconds per generation window; longer videos are possible through sliding windows.
 
@@ -495,6 +503,7 @@ class family_handler:
         if base_model_type == VIGGLE_ARCHITECTURE:
             result = family_handler.query_model_def(REF2VA_PRUNED_ARCHITECTURE, model_def)
             result.pop("resolution_budget_tiled", None)
+            result.pop("input_video_strength")
             result.update({
                 "profiles_dir": [VIGGLE_ARCHITECTURE],
                 "device_explicit": True,
@@ -530,7 +539,7 @@ class family_handler:
             pruned = base_model_type == CONTROL_PRUNED_ARCHITECTURE
             result = family_handler.query_model_def(FL2VA_PRUNED_ARCHITECTURE if pruned else FL2VA_ARCHITECTURE, model_def)
             result.pop("resolution_budget_tiled", None)
-            for key in ("guide_custom_choices", "custom_frames_injection", "one_image_ref_only", "switch_threshold"):
+            for key in ("guide_custom_choices", "custom_frames_injection", "one_image_ref_only", "switch_threshold", "input_video_strength"):
                 result.pop(key)
             result.update({
                 "profiles_dir": result["profiles_dir"] + [CONTROL_ARCHITECTURE],  # main blocks are FL2VA: its LoRA accelerator profiles apply
@@ -545,7 +554,7 @@ class family_handler:
                 "guidance_max_phases": 1, "lock_guidance_phases": True, "lora_multiplier_phases": 1, "phase_2_spatial_tiling": False, "inference_steps2": False,
                 "custom_settings": [setting for setting in result["custom_settings"] if setting["id"] == H3_AUDIO_REFINEMENT_SETTING],
                 "sliding_window_defaults": {**result["sliding_window_defaults"], "window_max": 362,
-                                            **({"overlap_min": 5, "overlap_max": 107, "overlap_offset": 5, "overlap_default": 22} if H3_CONTROL_LATENT_CONTINUATION else {})},
+                                            **({"overlap_min": 5, "overlap_max": 107, "overlap_offset": 5, "overlap_default": 22, "discard_step": 17} if H3_CONTROL_LATENT_CONTINUATION else {})},
                 "guide_preprocessing": {
                     "selection": ["", "PV", "DV", "EV", "SV", "CV", "V", "MV"],
                     "labels": {"V": "Use Control Video as is"},
@@ -649,9 +658,13 @@ class family_handler:
             "no_negative_prompt": True,
             "returns_audio": True,
             "audio_window_alignment": True,
-            "audio_overlap_repair_ms": 25,  # one audio latent, plus the measured waveform shortfall
+            "audio_overlap_repair_ms": 25,  # sources without an audio tail: one audio latent, plus the measured waveform shortfall
+            "audio_tail_ms": 100,  # generate() returns audio running past the last frame (H3_AUDIO_TAIL_LATENTS)
+            "end_image_before_discarded_frames": True,  # discarded last frames follow the end image of non-final windows
             "multimedia_generation": True,
             "image_end_frame_position": True,
+            "input_video_strength": {"label": "End Image / Injected Frames Strength (lower values let the video ease into them instead of jumping)",
+                                     "name": "End Image Strength"},
             "control_video_trim_disabled": True,
             "extract_guide_from_window_start": True,  # sliding windows get pure window-aligned guide frames; continuation comes through input_video
             "prompt_enhancer_picture_labels": True,  # enhancer images are labelled with the <Picture N> the pipeline presents
@@ -720,7 +733,8 @@ class family_handler:
                 "deepy_infos": REF2VA_DEEPY_INFOS,
                 "deepy_prompt_infos": REF2VA_DEEPY_PROMPT_INFOS,
                 "sliding_window_defaults": {"window_min": 124, "window_max": 481, "window_step": 17, "window_default": 362,
-                                            "overlap_min": 1, "overlap_max": 120, "overlap_step": 17, "overlap_offset": 1, "overlap_default": 18},
+                                            "overlap_min": 1, "overlap_max": 120, "overlap_step": 17, "overlap_offset": 1, "overlap_default": 18,
+                                            "discard_step": 1},
                 "frames_selection_maximum": 737,
                 "image_prompt_types_allowed": "TSEVL",
                 "end_frames_always_enabled": True,
@@ -797,7 +811,8 @@ class family_handler:
                 "deepy_infos": FL2VA_DEEPY_INFOS,
                 "deepy_prompt_infos": FL2VA_DEEPY_PROMPT_INFOS,
                 "sliding_window_defaults": {"window_min": 124, "window_max": 481, "window_step": 17, "window_default": 362,
-                                            "overlap_min": 1, "overlap_max": 120, "overlap_step": 17, "overlap_offset": 1, "overlap_default": 18},
+                                            "overlap_min": 1, "overlap_max": 120, "overlap_step": 17, "overlap_offset": 1, "overlap_default": 18,
+                                            "discard_step": 1},
                 "image_prompt_types_allowed": "TSEVL",
                 "end_frames_always_enabled": True,
                 "audio_guide_window_slicing": True,

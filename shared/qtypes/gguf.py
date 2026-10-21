@@ -2202,13 +2202,14 @@ def convert_to_quanto(state_dict, default_dtype, verboseLevel=1, detection=None)
 
 
 def _prepare_runtime_buffers(device):
+    # Packages before 1.0.12 have no explicit runtime buffers: they allocate their scratch lazily.
     module = _gguf_cuda_module()
-    if module is not None:
+    if hasattr(module, "prepare_runtime_buffers"):
         module.prepare_runtime_buffers(device)
 
 
 def _release_runtime_buffers():
-    if _GGUF_CUDA_MODULE is not None:
+    if hasattr(_GGUF_CUDA_MODULE, "release_runtime_buffers"):
         _GGUF_CUDA_MODULE.release_runtime_buffers()
 
 

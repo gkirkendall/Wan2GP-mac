@@ -76,7 +76,7 @@ from shared.utils.utils import convert_tensor_to_image, convert_video_tensor_to_
 from shared.utils.utils import calculate_new_dimensions, get_outpainting_dims, get_outpainting_frame_location, get_outpainting_full_area_dimensions, resolve_outpainting_dims
 from shared.utils.utils import has_video_file_extension, has_image_file_extension, has_audio_file_extension, has_mesh_file_extension, MESH_IMPORT_EXTENSIONS, guide_to_float, guide_mask_to_float
 from shared.utils.audio_video import extract_audio_tracks, subtitle_stream_count, combine_video_with_audio_tracks, combine_and_concatenate_video_with_audio_tracks, cleanup_temp_audio_files, normalize_audio_volumes_to_temp_files, save_video, save_hdr_video, save_image, get_image_format, get_media_duration_and_audio_layouts
-from shared.utils.audio_video import append_sliding_window_audio, audio_overlap_repair_seconds, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
+from shared.utils.audio_video import append_sliding_window_audio, audio_overlap_repair_seconds, source_audio_repair_ms, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
 from shared.utils.audio_video import truncate_audio, shift_audio_trim_ranges, trim_audio_ranges, trim_audio_file_ranges, slice_audio_window, resolve_mux_audio_sampling_rate
 from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
 from shared.utils.media_recording import record_file_metadata as shared_record_file_metadata
@@ -1103,6 +1103,7 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
         return err(window_boundary_error)
     validation_prompts = prompts
     frames_minimum, frames_steps, latent_size = get_model_min_frames_and_step(model_type)
+    discard_step = model_def.get("sliding_window_defaults", {}).get("discard_step", latent_size)  # 1 for models that recycle no latents
     inputs.pop("frame_scheduler", None)
     frame_scheduler = None
     scheduler_supported = frame_scheduler_supported(model_type, model_def, inputs.get("image_mode", 0), is_edit_mode)
@@ -1127,7 +1128,7 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
             allow_new_shot=image_prompt_types_allow_t2v(model_def, inputs.get("image_mode", 0)),
             first_window_overlap_frames=estimate_first_window_overlap_frames(inputs.get("image_start"), inputs.get("video_source"), inputs.get("keep_frames_video_source", ""), schedule_fps),
             initial_shared_frames=1 if inputs.get("image_start") is not None or inputs.get("video_source") is not None else 0,
-            discard_last_frames=int(inputs.get("sliding_window_discard_last_frames", 0) or 0) // latent_size * latent_size,
+            discard_last_frames=int(inputs.get("sliding_window_discard_last_frames", 0) or 0) // discard_step * discard_step,
         )
         if frame_scheduler_error is not None:
             return err(frame_scheduler_error)
@@ -7440,7 +7441,8 @@ def generate_media(
         sub_parallel_window_size += 1
     sub_parallel_window_overlap = max(0, int(sub_parallel_window_overlap or 0))
     if sliding_window_discard_last_frames !=0:
-        sliding_window_discard_last_frames = sliding_window_discard_last_frames // latent_size * latent_size 
+        discard_step = sliding_window_defaults.get("discard_step", latent_size)  # 1 for models that recycle no latents
+        sliding_window_discard_last_frames = sliding_window_discard_last_frames // discard_step * discard_step
 
     current_video_length = video_length
     # VAE Tiling
@@ -7947,7 +7949,9 @@ def generate_media(
                         image_size  = image_end_tensor.shape[-2:]
                         sample_fit_canvas = None
                 image_end_list= None
-            image_end_frame_position = current_video_length - tail_trim_frames - 1 if model_def.get("image_end_frame_position", False) else None  # also locates an injected frame used as the window's end image
+            # the end image of a non-final window can be generated before its discarded frames: it steers the window without being shown
+            end_image_before_discard = model_def.get("end_image_before_discarded_frames", False) and window_no < total_windows
+            image_end_frame_position = current_video_length - (automatic_trim_last_frames if end_image_before_discard else tail_trim_frames) - 1 if model_def.get("image_end_frame_position", False) else None  # also locates an injected frame used as the window's end image
             window_start_frame = guide_start_frame - (reuse_frames if window_no > 1 else source_video_overlap_frames_count)
             guide_end_frame = guide_start_frame + current_video_length - (source_video_overlap_frames_count if window_no == 1 else reuse_frames)
             alignment_shift = source_video_frames_count if reset_control_aligment else 0
@@ -7981,7 +7985,11 @@ def generate_media(
             if audio_window_alignment and audio_overlap_frames > 0 and not keep_input_audio and (window_no > 1 or source_audio_tracks):
                 overlap_audio = pre_audio_guide if window_no > 1 else input_waveform if input_audio_is_overlap else None
                 overlap_rate = pre_audio_guide_sample_rate if window_no > 1 else input_waveform_sample_rate
-                window_audio_repair_seconds = audio_overlap_repair_seconds(audio_overlap_frames, fps, model_def.get("audio_overlap_repair_ms", 0), overlap_audio, overlap_rate)
+                if window_no > 1:  # the previous window's audio is in memory, complete when the model returns an audio tail
+                    repair_ms = 0 if model_def.get("audio_tail_ms") else model_def.get("audio_overlap_repair_ms", 0)
+                else:
+                    repair_ms = source_audio_repair_ms(model_def.get("audio_overlap_repair_ms", 0), source_audio_tracks[0], source_audio_metadata[0].get("codec"), source_video_frames_count / fps)
+                window_audio_repair_seconds = audio_overlap_repair_seconds(audio_overlap_frames, fps, repair_ms, overlap_audio, overlap_rate)
             audio_conditioning_end = audio_overlap_frames / fps - window_audio_repair_seconds if input_audio_is_overlap and window_audio_repair_seconds > 0 else None
             if fantasy and audio_guide is not None:
                 audio_proj_split , audio_context_lens = parse_audio(audio_guide, start_frame = aligned_window_start_frame, num_frames= current_video_length, fps= fps,  device= processing_device  )
@@ -8489,7 +8497,7 @@ def generate_media(
                 skip_steps_cache.previous_residual = None
                 skip_steps_cache.previous_modulated_input = None
                 print(f"Skipped Steps:{skip_steps_cache.skipped_steps}/{skip_steps_cache.num_steps}" )
-            generated_audio = None
+            generated_audio = audio_tail = None
             drop_generated_audio = False
             audio_repair_samples = 0
             side_files = {}
@@ -8541,6 +8549,10 @@ def generate_media(
                     sample = sample[:, post_decode_pre_trim:]
                 if gen.get("extra_windows",0) > 0:
                     sliding_window = True 
+                if generated_audio is not None and audio_window_alignment and not drop_generated_audio and model_def.get("audio_tail_ms"):
+                    # audio past the last kept frame (the model's tail or discarded frames) is saved with the video: continuing it needs no repair
+                    kept_audio_samples = round((sample.shape[1] - (discard_last_frames + automatic_trim_last_frames if sliding_window else 0)) * output_audio_sampling_rate / fps)
+                    audio_tail = generated_audio[kept_audio_samples:kept_audio_samples + round(model_def["audio_tail_ms"] * output_audio_sampling_rate / 1000)]
                 if sliding_window :
                     guide_start_frame += current_video_length
                     if discard_last_frames > 0:
@@ -8778,6 +8790,7 @@ def generate_media(
                         save_video( tensor=output_video_frames, save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=container)
                     output_new_audio_temp_filepath = None
                     new_audio_tracks_are_pretrimmed = False
+                    saved_audio_tail_seconds = 0.0
                     new_audio_added_from_audio_start = reset_control_aligment or (full_generated_audio is not None and len(control_audio_tracks) == 0) # if not beginning of audio will be skipped
                     source_audio_duration = 0 if video_source is None else source_video_frames_count / fps - source_audio_repair_seconds
                     new_audio_trim_ranges = shift_audio_trim_ranges(external_audio_trim_ranges, source_video_frames_count if new_audio_added_from_audio_start else 0)
@@ -8822,6 +8835,8 @@ def generate_media(
                         output_new_audio_filepath = output_new_audio_temp_filepath = get_available_filename(save_path, f"tmp{time_flag}.wav" )
                         audio_data_to_write = output_new_audio_data if full_generated_audio is not None or len(new_audio_trim_ranges) == 0 else trim_audio_ranges(output_new_audio_data, new_audio_trim_ranges, fps, output_audio_sampling_rate)
                         new_audio_tracks_are_pretrimmed = full_generated_audio is not None or audio_data_to_write is not output_new_audio_data
+                        if full_generated_audio is not None and audio_tail is not None and len(audio_tail):
+                            audio_data_to_write, saved_audio_tail_seconds = np.concatenate([audio_data_to_write, audio_tail]), len(audio_tail) / output_audio_sampling_rate
                         write_wav_file(output_new_audio_filepath, audio_data_to_write, output_audio_sampling_rate)
                     if output_new_audio_filepath is not None:
                         new_audio_tracks = [output_new_audio_filepath]
@@ -8849,6 +8864,7 @@ def generate_media(
                         audio_codec_key=server_config.get("audio_output_codec", "aac_128"),
                         pad_audio_to_video=audio_window_alignment and full_generated_audio is not None,
                         verbose=verbose_level >= 2,
+                        audio_tail_seconds=saved_audio_tail_seconds,
                     )
                     os.remove(save_path_tmp)
                     if output_new_audio_temp_filepath is not None: os.remove(output_new_audio_temp_filepath)
