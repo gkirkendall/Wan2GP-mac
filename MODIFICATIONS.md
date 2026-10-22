@@ -4,6 +4,19 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-22: the same time-axis pad fix for Wan Uni3C and the H3 control mask (`mac-v0.2.5`)
+
+The MPS fault below is exact: `F.pad` on the time axis alone (spatial pad zero), at the front or the end, constant or replicate,
+is wrong once a frame has 65,536 pixels or more (65,535: correct). Pads of space and time together are correct, so the Wan, Qwen
+Image, LongCat and Hunyuan VAEs are not affected; the H3 transformer's frame pad (3D) and LongCat's latent pad are not either.
+1. **`shared/kernels/vae_ops.py`: `pad_front_frames` became `pad_frames(x, front=0, back=0, mode="constant"|"replicate")`**
+   (MPS: `torch.cat` of zero frames or edge-frame copies; other devices: `F.pad` as before). `pad_front_frames` remains, calling it.
+2. **`models/wan/camera_control/uni3c.py`**: the condition chunks' leading empty frames (on the GPU, wrong on MPS from 480x832 up).
+3. **`models/minimax_h3/pipeline.py` (`_resize_video_mask`)**: the control mask's trailing replicated frames. The mask is in RAM
+   today, so this was correct already; the change keeps it correct if it moves to the GPU.
+Tested against CPU `F.pad` for every form at 255x257, 256x256 and 576x1024 (lab `tools/test_pad_frames.py`: all pass). Uni3C
+has not been run on a Mac.
+
 ## 2026-10-22: MiniMax H3 video VAE encodes pictures correctly on MPS (`mac-v0.2.4`)
 
 1. **`shared/kernels/vae_ops.py`: new `pad_front_frames(x, front)`**, used by `frame_group_norm` and by

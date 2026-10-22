@@ -26,13 +26,25 @@ _DTYPES = (torch.bfloat16, torch.float16)
 _STREAM_CONV_MIN_PIXELS = 8192  # smaller calls keep cuDNN's lower launch overhead
 
 
-def pad_front_frames(x, front):
-    """Prepend ``front`` zero frames on the time axis of a 5D video tensor. MPS (torch 2.14.1) corrupts the copied frames of a
-    constant F.pad on that axis once a frame exceeds about 4k pixels, so MPS builds it with torch.cat; other devices keep F.pad."""
+def pad_frames(x, front=0, back=0, mode="constant"):
+    """Pad the time axis (dim 2) of a 5D video tensor with zero frames (``constant``) or copies of the edge frame (``replicate``).
+    MPS (torch 2.14.1) corrupts F.pad on the time axis alone once a frame has 65,536 pixels or more, so MPS builds it with
+    torch.cat; other devices keep F.pad."""
     if x.device.type != "mps":
-        return F.pad(x, (0, 0, 0, 0, front, 0))
-    zeros = x.new_zeros(x.shape[0], x.shape[1], front, *x.shape[3:])
-    return torch.cat([zeros, x], dim=2)
+        return F.pad(x, (0, 0, 0, 0, front, back), mode=mode)
+    def edge(count, frame):
+        if mode == "replicate":
+            return frame.expand(-1, -1, count, -1, -1)
+        return x.new_zeros(x.shape[0], x.shape[1], count, *x.shape[3:])
+    parts = [edge(front, x[:, :, :1])] if front else []
+    parts.append(x)
+    if back:
+        parts.append(edge(back, x[:, :, -1:]))
+    return torch.cat(parts, dim=2) if len(parts) > 1 else x
+
+
+def pad_front_frames(x, front):
+    return pad_frames(x, front=front)
 
 
 def prepare_rotary(cos, sin):

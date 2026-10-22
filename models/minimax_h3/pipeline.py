@@ -1,4 +1,5 @@
 """WanGP inference pipeline for MiniMax H3."""
+from shared.kernels import vae_ops
 from shared.utils.media_control import inference_checkpoint
 
 import functools
@@ -166,7 +167,7 @@ def _resize_video_mask(mask, latent_shape, clip_length, temporal_ratio, binarize
     mask = guide_mask_to_float(mask[:1]).unsqueeze(0).float()
     pad_frames = (-mask.shape[2]) % clip_length
     if pad_frames:
-        mask = F.pad(mask, (0, 0, 0, 0, 0, pad_frames), mode="replicate")
+        mask = vae_ops.pad_frames(mask, back=pad_frames, mode="replicate")
     offsets = [0, *range(1, clip_length, temporal_ratio)]
     intervals = list(zip(offsets, [*offsets[1:], clip_length]))
     mask = torch.stack([

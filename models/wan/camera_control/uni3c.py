@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from shared.kernels import vae_ops
 from shared.utils import files_locator as fl
 from shared.utils.phase_progress import control_video_encoding
 from ..modules.model import WanSelfAttention
@@ -158,7 +159,7 @@ def _condition_chunks(holes, K, w2c, lat_frames, frame_step):
         frames = slice(0, 1) if latent_no == 0 else slice(frame_step * (latent_no - 1) + 1, frame_step * latent_no + 1)
         count = frames.stop - frames.start
         chunk = torch.cat([holes[None, frames], _camera_rays(K.expand(count, -1, -1), w2c[frames], height, width)])[None]
-        yield F.pad(chunk, (0, 0, 0, 0, frame_step - count, 0))
+        yield vae_ops.pad_frames(chunk, front=frame_step - count)
 
 
 def _estimate_metric_depth(image, focal):
