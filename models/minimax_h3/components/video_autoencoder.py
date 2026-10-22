@@ -67,7 +67,7 @@ class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
                 hidden_states, (padding, padding, padding, padding, 0, 0), mode=self.spatial_padding_mode
             )
         if self.temporal_padding > 0 and not pre_padded:
-            hidden_states = F.pad(hidden_states, (0, 0, 0, 0, self.temporal_padding, 0), mode="constant")
+            hidden_states = vae_ops.pad_front_frames(hidden_states, self.temporal_padding)
         x_list, hidden_states = [hidden_states], None
         return vae_ops.conv3d(x_list, self, residual)
 

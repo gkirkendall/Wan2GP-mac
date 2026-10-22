@@ -4,6 +4,19 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-10-22: MiniMax H3 video VAE encodes pictures correctly on MPS (`mac-v0.2.4`)
+
+1. **`shared/kernels/vae_ops.py`: new `pad_front_frames(x, front)`**, used by `frame_group_norm` and by
+   **`models/minimax_h3/components/video_autoencoder.py`** (`MiniMaxH3VideoCausalConv3d.forward`) for the causal zero frames.
+   PyTorch 2.14.1 on MPS corrupts a constant `F.pad` on the time axis of a 5D tensor once a frame exceeds about 4k pixels (the
+   copied frames come back wrong; spatial padding is fine; 8x8 and 64x64 frames are fine, 290x514 is not). On MPS the zero frames are
+   now joined with `torch.cat`; other devices keep `F.pad`, so NVIDIA and AMD behave as before.
+   Effect: every H3 picture encode on the Mac was wrong (start/end frames, reference images, control videos). FL2VA rendered a
+   flat brown field because it copies the start frame's latent into frame 0; Ref2VA only got a loose redraw of its references.
+   Measured (512x288 start frame, encode then decode): latent cosine against a CPU fp32 encode went from −0.47 (fp32) / NaN (fp16)
+   to 1.0000 untiled and 0.9867 tiled, the same as CPU tiled against CPU untiled; the decoded picture SSIM went from 0.19 to 0.53,
+   equal to the CPU encode's.
+
 ## 2026-10-21: merged upstream `fdc63bdf`, H3 audio continuity (`mac-v0.2.3`)
 
 Upstream's one commit (2026-10-19, 10 files) merged into `mac-fixes` with no conflicts; our MPS edits in `pipeline.py` and the

@@ -26,6 +26,15 @@ _DTYPES = (torch.bfloat16, torch.float16)
 _STREAM_CONV_MIN_PIXELS = 8192  # smaller calls keep cuDNN's lower launch overhead
 
 
+def pad_front_frames(x, front):
+    """Prepend ``front`` zero frames on the time axis of a 5D video tensor. MPS (torch 2.14.1) corrupts the copied frames of a
+    constant F.pad on that axis once a frame exceeds about 4k pixels, so MPS builds it with torch.cat; other devices keep F.pad."""
+    if x.device.type != "mps":
+        return F.pad(x, (0, 0, 0, 0, front, 0))
+    zeros = x.new_zeros(x.shape[0], x.shape[1], front, *x.shape[3:])
+    return torch.cat([zeros, x], dim=2)
+
+
 def prepare_rotary(cos, sin):
     return _kitchen.prepare_rotary(cos, sin)
 
@@ -62,7 +71,7 @@ def frame_group_norm(x_list, norm, silu_pad=None):
     if silu_pad is not None:
         x = F.silu(x)
         x = F.pad(x, (left, right, top, bottom, 0, 0), mode="reflect")
-        x = F.pad(x, (0, 0, 0, 0, front, 0))
+        x = pad_front_frames(x, front)
     return x
 
 
