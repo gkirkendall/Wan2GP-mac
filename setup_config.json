@@ -22,8 +22,8 @@
                 }
             },
             "mps": {
-                "label": "Torch 2.14.1 (MPS / Apple Silicon)",
-                "cmd": "torch==2.14.1 torchvision==0.29.1 torchaudio==2.11.0"
+                "label": "Torch 2.15.0 (MPS / Apple Silicon)",
+                "cmd": "torch==2.15.0 torchvision==0.29.2 torchaudio==2.11.1"
             }
         },
         "triton": {

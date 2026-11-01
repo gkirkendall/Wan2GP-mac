@@ -4,6 +4,28 @@ This repository is a fork of [deepbeepmeep/Wan2GP](https://github.com/deepbeepme
 It is **not** an official WanGP release, and its changes are **not endorsed** by the WanGP Licensor. The WanGP Community License 2.0 (`LICENSE.txt`) applies unchanged.
 These notes record the modifications as required by section 4.1(d) of that license.
 
+## 2026-11-01: PyTorch 2.15.0 on Apple Silicon (`mac-v0.2.6`)
+
+1. **`setup_config.json`: the `mps` profile pins `torch==2.15.0 torchvision==0.29.2 torchaudio==2.11.1`** (was 2.14.1, 0.29.1, 2.11.0). `torchcodec==0.17.0` is unchanged.
+   Other profiles are not touched, so NVIDIA and AMD installs behave as before.
+
+**MPS now requires macOS 15 or later**: on macOS 14, PyTorch 2.15 reports MPS as unavailable, although its wheels still install there.
+
+2.15 fixes the bugs behind `mac-v0.2.2` and `mac-v0.2.4`/`mac-v0.2.5` upstream: raw MPS `F.pad` was correct for every form in the lab's pad test, and a one-call MPS-to-CPU `float64` copy now raises an error instead of returning zeros.
+The fork's `pad_frames` and move-then-cast code stay: they are still correct. GPU command buffer failures, such as out of memory, now raise errors instead of returning zeros.
+
+Measured on an M4 Max (128 GB), 2.14.1 against 2.15.0, same jobs and seeds, fork code unchanged. Each 2.15 run happened with a large download in the background; the 2.14 baselines did not:
+
+| Job | 2.14.1 | 2.15.0 | Output |
+|---|---|---|---|
+| LTX-2.5 Distilled, 832x480, 97 frames | 163 s | 154 s | SSIM 0.959 against 2.14 |
+| Qwen Image Edit 2511, 2 steps | 676 s | 477 s | SSIM 0.989 against 2.14 |
+| MiniMax H3 Ref2VA Pruned PDD, 1024x576, 124 frames | 2,128 s | 2,416 s | Decoded video and audio bit-identical |
+| MiniMax H3 FL2VA Pruned PDD, 512x288, 107 frames | about 13 min | 596 s | Decoded video and audio bit-identical |
+
+The H3 Ref2VA slowdown (+14%) is unexplained and may come from the background download. The FL2VA 2.14 time is approximate.
+Weight transfers through mmgp's `_PinnedStager` were exact in 5 of 5 runs. Video and audio decoding through torchcodec were byte-identical on one H3 clip.
+
 ## 2026-10-22: the same time-axis pad fix for Wan Uni3C and the H3 control mask (`mac-v0.2.5`)
 
 The MPS fault below is exact: `F.pad` on the time axis alone (spatial pad zero), at the front or the end, constant or replicate,
